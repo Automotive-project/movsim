@@ -29,13 +29,13 @@ package org.movsim.simulator.roadnetwork;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.Set;
 
 import javax.annotation.CheckForNull;
 
 import org.jgrapht.graph.DefaultWeightedEdge;
 import org.movsim.roadmappings.RoadMapping;
-import org.movsim.simulator.MovsimConstants;
 import org.movsim.simulator.roadnetwork.boundaries.AbstractTrafficSource;
 import org.movsim.simulator.roadnetwork.boundaries.SimpleRamp;
 import org.movsim.simulator.roadnetwork.boundaries.TrafficSink;
@@ -55,6 +55,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
+import com.google.common.collect.Lists;
 
 /**
  * <p>
@@ -99,6 +100,8 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
     static final int INITIAL_ID = 1;
     private static int nextId = INITIAL_ID;
 
+    private RoadSegmentDirection directionType = RoadSegmentDirection.FORWARD;
+
     /** the nodeId is an internally used unique identifier for the road. */
     private final int id;
     /** the userId is the nodeId specified in the .xodr and .xml files. */
@@ -128,8 +131,17 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
 
     private RoadSegment peerRoadSegment;
 
+    private Node origin = new NodeImpl("origin");
+    private Node destination = new NodeImpl("destination");
+
     /** simple ramp (source) with dropping mechanism */
     private SimpleRamp simpleRamp;
+
+    /** dynamic ff speed, considering speed limits. */
+    private double meanFreeFlowSpeed = -1;
+
+    /** static freeflow speed as maximum speed that is allowed. */
+    private double freeFlowSpeed = RoadTypeSpeeds.INSTANCE.getDefaultFreeFlowSpeed();
 
     public static class TestCar {
         public double s = 0.0; // distance
@@ -177,22 +189,12 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         overtakingSegment = new LaneSegment(this, Lanes.OVERTAKING);
     }
 
-    public RoadSegment(double roadLength, int laneCount, RoadMapping roadMapping) {
+    public RoadSegment(double roadLength, int laneCount, RoadMapping roadMapping,
+            RoadSegmentDirection roadSegmentDirection) {
         this(roadLength, laneCount);
+        this.directionType = roadSegmentDirection;
         this.roadMapping = Preconditions.checkNotNull(roadMapping);
     }
-
-    /**
-     * Convenience constructor, creates road segment based on a given road mapping.
-     * 
-     * @param roadMapping
-     */
-    // public RoadSegment(RoadMapping roadMapping) {
-    // this(roadMapping.roadLength(), roadMapping.laneCount());
-    // assert roadMapping.trafficLaneMin() == Lanes.LANE1;
-    // assert roadMapping.trafficLaneMax() == laneCount;
-    // this.roadMapping = roadMapping;
-    // }
 
     /**
      * Sets a default sink for this road segment.
@@ -230,6 +232,10 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      */
     public final String userId() {
         return userId == null ? Integer.toString(id) : userId;
+    }
+
+    public final RoadSegmentDirection directionType() {
+        return directionType;
     }
 
     /**
@@ -439,15 +445,16 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
     }
 
     public final boolean hasUpstreamConnection() {
-        return sizeSourceRoadSegments() > 0;
+        return getSizeSourceRoadSegments() > 0;
     }
 
     public final boolean hasDownstreamConnection() {
-        return sizeSinkRoadSegments() > 0;
+        return getSizeSinkRoadSegments() > 0;
     }
 
-    public final int sizeSinkRoadSegments() {
+    public final int getSizeSinkRoadSegments() {
         if (sizeSinkRoadSegments < 0) {
+            // lazy init
             Set<RoadSegment> sinkRoadSegments = new HashSet<>();
             for (LaneSegment laneSegment : laneSegments) {
                 if (laneSegment.hasSinkLaneSegment()) {
@@ -459,8 +466,9 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return sizeSinkRoadSegments;
     }
 
-    public final int sizeSourceRoadSegments() {
+    public final int getSizeSourceRoadSegments() {
         if (sizeSourceRoadSegments < 0) {
+            // lazy init
             Set<RoadSegment> sourceRoadSegments = new HashSet<>();
             for (LaneSegment laneSegment : laneSegments) {
                 if (laneSegment.hasSourceLaneSegment()) {
@@ -587,10 +595,10 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return vehicleFuelUsedLiters;
     }
 
-    public double meanSpeed() {
+    public double meanSpeedOfVehicles() {
         double sumSpeed = 0;
         int vehCount = 0;
-        for (final LaneSegment laneSegment : laneSegments) {
+        for (LaneSegment laneSegment : laneSegments) {
             for (Vehicle veh : laneSegment) {
                 if (veh.type() == Vehicle.Type.OBSTACLE) {
                     continue;
@@ -599,17 +607,77 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
                 ++vehCount;
             }
         }
-        return (vehCount > 0) ? sumSpeed / vehCount : MovsimConstants.FREE_SPEED;
+        return (vehCount > 0) ? sumSpeed / vehCount : getHarmonicMeanFreeflowSpeed();
+    }
+
+    private double getHarmonicMeanFreeflowSpeed() {
+        if (meanFreeFlowSpeed < 0) {
+            // evaluate lazy here
+            double sumInvers = 0;
+            double currentPosition = 0;
+            double speedLimitPosition = 0;
+            double currentSpeedLimit = freeFlowSpeed;
+
+            // tricky
+            for (SpeedLimit speedLimit : speedLimits()) {
+                speedLimitPosition = speedLimit.position();
+                sumInvers += (1. / currentSpeedLimit) * (speedLimitPosition - currentPosition);
+                currentSpeedLimit = Math.min(speedLimit.getSpeedLimit(), freeFlowSpeed);
+                currentPosition = speedLimitPosition;
+            }
+
+            sumInvers += (1. / currentSpeedLimit) * (roadLength - speedLimitPosition);
+            meanFreeFlowSpeed = 1. / (sumInvers / roadLength);
+        }
+        return meanFreeFlowSpeed;
+    }
+
+    private double getSpeedLimit(double position) {
+        double speedLimit = getFreeFlowSpeed();
+        for (SpeedLimit sl : speedLimits()) {
+            if (position < sl.position()) {
+                return speedLimit;
+            }
+            speedLimit = sl.getSpeedLimit();
+        }
+        return speedLimit;
     }
 
     /**
-     * Returns the instantaneous travel time defined by the road element length and current mean speed of all vehicles.
-     * An adhoc free speed is assumed in case of an empty road.
+     * Returns the instantaneous travel time defined by the road element length
+     * and current mean speed of all vehicles. An adhoc free speed is assumed in
+     * case of an empty road. An adhoc minimum speed is assumed in case of a
+     * standstill to avoid a diverging traveltime.
      * 
-     * @return instantantaneous travel time with adhoc assumed travel time if road is empty
+     * @return instantantaneous travel time with assumed travel time if road is
+     *         empty and with assumed maximum travel time in standstill
      */
     public double instantaneousTravelTime() {
-        return roadLength / meanSpeed();
+        final double dx = 100; // TODO refactor
+        double position = 0;
+        double totalTravelTime = 0;
+        // TODO hack here, depends on order of vehicles
+        LinkedList<Vehicle> vehicles = Lists.newLinkedList();
+        Iterators.addAll(vehicles, iterator());
+        while (position < roadLength) {
+            double end = Math.min(position + dx, roadLength);
+            double maxRoadSpeed = freeFlowSpeed; // FIXME consider speedlimits
+            totalTravelTime += travelTimeInRange(position, end, maxRoadSpeed, vehicles);
+            position += dx;
+        }
+        return totalTravelTime;
+    }
+
+    private static double travelTimeInRange(double begin, double end, double maxRoadSpeed, LinkedList<Vehicle> vehicles) {
+        int count = 0;
+        double sumSpeed = 0;
+        while (!vehicles.isEmpty() && vehicles.getLast().getFrontPosition() < end) {
+            Vehicle veh = vehicles.removeLast();
+            sumSpeed += veh.getSpeed();
+            count++;
+        }
+        double avgSpeed = (count == 0) ? maxRoadSpeed : sumSpeed / count;
+        return (end - begin) / avgSpeed;
     }
 
     /**
@@ -689,7 +757,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      */
     public void addObstacle(Vehicle obstacle) {
         assert obstacle.type() == Vehicle.Type.OBSTACLE;
-        obstacle.setRoadSegment(id, roadLength);
+        obstacle.setRoadSegment(this);
         addVehicle(obstacle);
     }
 
@@ -699,7 +767,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      * @param vehicle
      */
     public void addVehicle(Vehicle vehicle) {
-        vehicle.setRoadSegment(id, roadLength);
+        vehicle.setRoadSegment(this);
         laneSegments[vehicle.lane() - 1].addVehicle(vehicle);
     }
 
@@ -709,7 +777,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      * @param vehicle
      */
     public void appendVehicle(Vehicle vehicle) {
-        vehicle.setRoadSegment(id, roadLength);
+        vehicle.setRoadSegment(this);
         laneSegments[vehicle.lane() - 1].appendVehicle(vehicle);
     }
 
@@ -733,6 +801,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
     // new concept needed here, perhaps temporary vehicle objects, could also be used for LaneChanges
     // Good test: check for identical numbers of vehicles passing x=xRoadLength and x=0 of successor RoadSegment.
     private boolean updateSignalPointsBeforeOutflowCalled;
+
     protected void updateSignalPointsBeforeOutflow(double simulationTime) {
         updateSignalPointsBeforeOutflowCalled = true;
         for (SignalPoint signalPoint : signalPoints) {
@@ -744,11 +813,13 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
     public void updateSignalPointsAfterOutflowAndInflow(double simulationTime) {
         assert updateSignalPointsBeforeOutflowCalled; // hack for assuring right calling process
         for (SignalPoint signalPoint : signalPoints) {
+            // TODO vehicles on overtaking segment ignored here, iterate over those as well...test with iteratorAllVehicles()
             signalPoint.registerPassingVehicles(simulationTime, iterator());
         }
         updateSignalPointsBeforeOutflowCalled = false;
     }
 
+    // TOO SLOW FOR GENERAL PURPOSE
     public Iterator<Vehicle> vehiclesWithinRange(double begin, double end) {
         return Iterators.filter(iterator(), new VehicleWithinRange(begin, end));
     }
@@ -775,11 +846,12 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      *            the number of iterations that have been executed
      */
     public void makeLaneChanges(double dt, double simulationTime, long iterationCount) {
+
         if (!hasPeer() && laneCount < 2) {
             // need at least 2 lanes or a peerRoad for lane changing
             return;
         }
-        
+
         if (!overtakingSegmentInitialized) {
             initOvertakingLane(); // lazy init.
         }
@@ -790,7 +862,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
             for (Iterator<Vehicle> vehIterator = laneSegment.iterator(); vehIterator.hasNext();) {
                 Vehicle vehicle = vehIterator.next();
                 assert vehicle.roadSegmentId() == id;
-                if(vehicle.inProcessOfLaneChange()){
+                if (vehicle.inProcessOfLaneChange()) {
                     // !!! assure update in each simulation timestep
                     vehicle.updateLaneChangeDelay(dt);
                 } else if (vehicle.considerLaneChange(dt, this)) {
@@ -813,6 +885,14 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         checkFinishingOvertaking(dt);
     }
 
+    public void makeDynamicRoutingDecisions() {
+        for (LaneSegment laneSegment : laneSegments) {
+            for (Vehicle vehicle : laneSegment) {
+                vehicle.routingDecisions().considerRouteAlternatives(this);
+            }
+        }
+    }
+
     private void initOvertakingLane() {
         // connect overtaking lane according to connections of most inner lane
         LaneSegment sinkLane1 = laneSegment(Lanes.MOST_INNER_LANE).sinkLaneSegment();
@@ -828,7 +908,7 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
 
     private void checkFinishingOvertaking(double dt) {
         for (Iterator<Vehicle> vehIterator = overtakingSegment.iterator(); vehIterator.hasNext();) {
-           Vehicle vehicle = vehIterator.next();
+            Vehicle vehicle = vehIterator.next();
             if (vehicle.inProcessOfLaneChange()) {
                 // assure update in each simulation timestep
                 vehicle.updateLaneChangeDelay(dt);
@@ -1088,6 +1168,11 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return overtakingSegment.iterator();
     }
 
+    // not yet used
+    final Iterator<Vehicle> iteratorAllVehicles() {
+        return Iterators.concat(iterator(), overtakingVehicles());
+    }
+
     /**
      * Check for inconsistencies.
      * 
@@ -1242,41 +1327,6 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return signalPoints;
     }
 
-    // TODO new concept, think about refactoring
-    public class Node {
-
-        private long nodeId = Long.MAX_VALUE;
-        private final String type;
-
-        public Node(String type) {
-            this.type = Preconditions.checkNotNull(type);
-        }
-
-        public boolean hasId() {
-            return nodeId != Long.MAX_VALUE;
-        }
-
-        public long getId() {
-            return nodeId;
-        }
-
-        public void setId(long id) {
-            if (hasId() && this.nodeId != id) {
-                throw new IllegalArgumentException("nodetype=" + this + " already set with value=" + this.nodeId);
-            }
-            this.nodeId = id;
-        }
-
-        @Override
-        public String toString() {
-            return "Node[type=" + type + ", nodeId=" + (this.hasId() ? this.getId() : "") + "]";
-        }
-
-    }
-
-    private Node origin = new Node("origin");
-    private Node destination = new Node("destination");
-
     public Node getOriginNode() {
         return origin;
     }
@@ -1303,6 +1353,14 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         Preconditions.checkNotNull(peerRoadSegment);
         Preconditions.checkArgument(!peerRoadSegment.equals(this));
         this.peerRoadSegment = peerRoadSegment;
+    }
+
+    public double getFreeFlowSpeed() {
+        return freeFlowSpeed;
+    }
+
+    public void setFreeFlowSpeed(double freeFlowSpeed) {
+        this.freeFlowSpeed = freeFlowSpeed;
     }
 
 }

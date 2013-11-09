@@ -1,0 +1,68 @@
+# gnuplot command file
+
+# parameterised startStop command file
+# invoke using -e option to set parameters, eg:
+# gnuplot -e "lang='de'" routingDecisions.gpl
+
+#set datafile separator ","
+
+# parameters
+if (!exists("inputPath")) inputPath = "./"
+if (!exists("outputPath")) outputPath = "./"
+if (!exists("baseFile")) baseFile = "routing_test"
+print "basefile=".baseFile
+
+# variables
+vehicle = "Equipped"
+serviceprovider = "wiseGuy"
+
+# input files
+totalttFile = "totalVehicleTravelTime.csv"
+
+# output files
+totaltraveltimeOutput = outputPath.baseFile.".total_traveltime.eps"
+
+########  Line Styles  ###################################
+
+set style line 1 linetype 1 linewidth 7 pointtype 7 pointsize 1.5 lc rgb "#000000"
+set style line 2 linetype 7 linewidth 3 pointtype 5 pointsize 1.5 lc rgb "#dd0000"
+set style line 3 linetype 1 linewidth 7 pointtype 9 pointsize 1.5 lc rgb "#ff8800"
+set style line 4 linetype 3 linewidth 3 pointtype 11 pointsize 1.5 lc rgb "#00aa44"
+set style line 5 linetype 5 linewidth 7 pointtype 13 pointsize 1.5 lc rgb "#220099"
+
+set style line 1 linetype 11 linewidth 7 pointtype 7 pointsize 0.2 lc rgb "#000000"
+
+min(x,y)=(x<y) ? x : y
+
+set term post eps enhanced color dash "Helvetica" 26
+set nogrid
+
+
+########################################################
+
+set size 1,1
+set title ""
+set key box
+set nokey
+set ticslevel 0
+set nogrid
+
+######### total travel times  ##########################
+#set palette defined (0 "red", 20 "orange", 40 "yellow", 60 "green", 80 "blue",  100 "#dd00ff" )
+set pm3d; set pm3d map
+#set contour surface
+set cntrparam bspline
+set cntrparam levels 20
+unset clabel  
+unset surface
+#set xrange [0:100]
+
+set title "Average total traveltime (s)"
+set xlabel "Equipment Level (%)"
+set ylabel "Uncertainty (min)"
+
+set out totaltraveltimeOutput
+print "file=".totalttFile
+splot totalttFile using ($1*100):($2/60.):($3) with lines linestyle 99
+
+#with points ps 2 pt 7 palette

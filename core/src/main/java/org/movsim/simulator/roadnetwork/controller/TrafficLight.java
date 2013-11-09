@@ -32,18 +32,17 @@ import java.util.Map.Entry;
 import java.util.Set;
 
 import org.movsim.autogen.TrafficLightStatus;
-import org.movsim.network.autogen.opendrive.LaneValidity;
 import org.movsim.network.autogen.opendrive.OpenDRIVE;
 import org.movsim.network.autogen.opendrive.OpenDRIVE.Controller;
 import org.movsim.network.autogen.opendrive.OpenDRIVE.Road.Signals.Signal;
 import org.movsim.simulator.roadnetwork.LaneSegment;
-import org.movsim.simulator.roadnetwork.Lanes;
 import org.movsim.simulator.roadnetwork.RoadSegment;
 import org.movsim.simulator.roadnetwork.SignalPoint;
 import org.movsim.simulator.roadnetwork.regulator.Regulator;
 import org.movsim.simulator.vehicles.Vehicle;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Sets;
 
 /**
  * Represents a 'traffic light' to which vehicles will react. The visibility range is limited to {@code MAX_LOOK_AHEAD_DISTANCE}, e.g.
@@ -52,7 +51,7 @@ import com.google.common.base.Preconditions;
  */
 public class TrafficLight extends RoadObjectController {
 
-    private static final double MAX_LOOK_AHEAD_DISTANCE = 1000;
+    public static final double MAX_LOOK_AHEAD_DISTANCE = 1000;
 
     /** The status. */
     private TrafficLightStatus status;
@@ -72,6 +71,9 @@ public class TrafficLight extends RoadObjectController {
 
     public TrafficLight(Signal signal, Controller controller, RoadSegment roadSegment) {
         super(RoadObjectType.TRAFFICLIGHT, signal.getS(), roadSegment);
+        if (signal.isSetValidity()) {
+            throw new IllegalArgumentException("cannot use xodr validity information from signal-id=" + signal.getId());
+        }
         this.controller = Preconditions.checkNotNull(controller);
         this.signal = Preconditions.checkNotNull(signal);
         Preconditions.checkArgument(signal.isSetId(), "id not set");
@@ -79,21 +81,7 @@ public class TrafficLight extends RoadObjectController {
         Preconditions.checkArgument(signal.isSetS(), "signal.s not set");
         this.signalType = Preconditions.checkNotNull(checkTypesAndExtractSignalType());
         this.groupId = controller.getId();
-        setLaneValidity();
         signalPointEnd = new SignalPoint(position, roadSegment);
-    }
-
-    private void setLaneValidity() {
-        if (signal.isSetValidity()) {
-            for (int lane = Lanes.MOST_INNER_LANE; lane <= roadSegment.laneCount(); lane++) {
-                setLaneValidity(lane, false);
-            }
-            for (LaneValidity laneValidity : signal.getValidity()) {
-                for (int lane = Math.abs(laneValidity.getFromLane()); lane <= Math.abs(laneValidity.getToLane()); lane++) {
-                    setLaneValidity(lane, true);
-                }
-            }
-        }
     }
 
     private String checkTypesAndExtractSignalType() {
@@ -117,6 +105,15 @@ public class TrafficLight extends RoadObjectController {
      */
     public String signalId() {
         return signal.getId();
+    }
+
+    /**
+     * Returns the signal Name.
+     * 
+     * @return the label
+     */
+    public String signalName() {
+        return signal.getName();
     }
 
     public Signal signal() {
@@ -171,7 +168,10 @@ public class TrafficLight extends RoadObjectController {
     // trigger from viewer via mouse-click (direct communication from signal to controller)
     // shouldn't be called from external, use controller instead
     public void triggerNextPhase() {
-        triggerCallback.nextPhase();
+        if (hasTriggerCallback()) {
+            LOG.debug("mouse click triggers next phase");
+            triggerCallback.nextPhase();
+        }
     }
 
     public void setTriggerCallback(TriggerCallback triggerCallback) {
@@ -194,7 +194,7 @@ public class TrafficLight extends RoadObjectController {
      * @return
      */
     @Deprecated
-    public int lightCount() {
+    public static int lightCount() {
         // return Math.min(3, possibleStati.size());
         return 3;
     }
@@ -211,31 +211,22 @@ public class TrafficLight extends RoadObjectController {
         // downstream signal point is on local roadSegment
         roadSegment.signalPoints().add(signalPointEnd);
         LOG.info("trafficlight={}", this);
-        LOG.info("trafficlight *end* signal point placed at position={} on roadSegment={}.", position,
-                roadSegment);
+        LOG.info("trafficlight end signal point placed at position={} on roadSegment={}.", position, roadSegment);
 
         // create signal points for upstream signal points on potentially other roadsegments
         double upstreamPosition = position - MAX_LOOK_AHEAD_DISTANCE;
         if (upstreamPosition >= 0 || !roadSegment.hasUpstreamConnection()) {
             upstreamPosition = Math.max(0, upstreamPosition);
-            signalPointsBegin.put(roadSegment, new SignalPoint(upstreamPosition, roadSegment));
-            LOG.info("trafficlight signal start point placed at position={} on *same* roadSegment={}",
-                    upstreamPosition, roadSegment);
+            addSignalPointBegin(upstreamPosition, roadSegment);
         } else {
-            // put signal points to all upstream road segments
-            for (LaneSegment laneSegment : roadSegment.laneSegments()) {
-                if (laneSegment.hasSourceLaneSegment()) {
-                    RoadSegment upstreamRoadSegment = laneSegment.sourceLaneSegment().roadSegment();
-                    double upstreamPositionNewRoad = Math.max(0, upstreamRoadSegment.roadLength()
-                            + (position - MAX_LOOK_AHEAD_DISTANCE));
-                    signalPointsBegin.put(upstreamRoadSegment, new SignalPoint(upstreamPositionNewRoad,
-                            upstreamRoadSegment));
-                    if (upstreamPositionNewRoad == 0) {
-                        LOG.info("trafficlight signal start point placed at position={} on upstream roadSegment={}",
-                                upstreamPositionNewRoad, upstreamRoadSegment);
-                    }
-                }
-            }
+            // put signal points to all upstream road segments while checking recursively
+            Set<RoadSegment> visitedRoadSegments = Sets.newHashSet();
+            double dxToGo = MAX_LOOK_AHEAD_DISTANCE - position;
+            addSignalPointsToUpstreamRoadSegments(roadSegment, dxToGo, visitedRoadSegments);
+        }
+
+        if (signalPointsBegin.isEmpty()) {
+            throw new IllegalStateException("did not set any upstream signal points for traffic light=" + toString());
         }
 
         // add created signals to roadSegments
@@ -244,11 +235,37 @@ public class TrafficLight extends RoadObjectController {
         }
     }
 
+    private void addSignalPointBegin(double upstreamPosition, RoadSegment upstreamRoadSegment) {
+        SignalPoint signalPoint = new SignalPoint(upstreamPosition, upstreamRoadSegment);
+        signalPointsBegin.put(upstreamRoadSegment, signalPoint);
+        LOG.info("trafficlight signal start point placed at position={} on roadSegment={}", upstreamPosition,
+                upstreamRoadSegment);
+    }
+
+    private void addSignalPointsToUpstreamRoadSegments(RoadSegment startRoadSegment, double dxToGo,
+            Set<RoadSegment> visitedRoadSegments) {
+        for (LaneSegment laneSegment : startRoadSegment.laneSegments()) {
+            if (laneSegment.hasSourceLaneSegment()) {
+                RoadSegment upstreamRoadSegment = laneSegment.sourceLaneSegment().roadSegment();
+                if (!visitedRoadSegments.contains(upstreamRoadSegment)) {
+                    visitedRoadSegments.add(upstreamRoadSegment);
+                    double posSignalPoint = upstreamRoadSegment.roadLength() - dxToGo;
+                    if (posSignalPoint >= 0 || !upstreamRoadSegment.hasUpstreamConnection()) {
+                        addSignalPointBegin(Math.max(0, posSignalPoint), upstreamRoadSegment);
+                    } else {
+                        // call recursively
+                        addSignalPointsToUpstreamRoadSegments(upstreamRoadSegment, -posSignalPoint, visitedRoadSegments);
+                    }
+                }
+            }
+        }
+    }
+
     @Override
     public void timeStep(double dt, double simulationTime, long iterationCount) {
         for (SignalPoint signalPoint : signalPointsBegin.values()) {
             for (Vehicle vehicle : signalPoint.passedVehicles()) {
-                vehicle.addTrafficLight(this);
+                vehicle.getTrafficLightApproaching().addTrafficLight(this);
                 LOG.debug("vehicle pos={} --> set trafficlight={}", vehicle.getFrontPosition(), this);
             }
         }
