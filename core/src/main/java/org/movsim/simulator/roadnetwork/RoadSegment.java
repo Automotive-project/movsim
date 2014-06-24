@@ -39,6 +39,7 @@ import org.movsim.roadmappings.RoadMapping;
 import org.movsim.simulator.roadnetwork.boundaries.AbstractTrafficSource;
 import org.movsim.simulator.roadnetwork.boundaries.SimpleRamp;
 import org.movsim.simulator.roadnetwork.boundaries.TrafficSink;
+import org.movsim.simulator.roadnetwork.controller.FlowConservingBottleneck;
 import org.movsim.simulator.roadnetwork.controller.GradientProfile;
 import org.movsim.simulator.roadnetwork.controller.RoadObject;
 import org.movsim.simulator.roadnetwork.controller.RoadObject.RoadObjectType;
@@ -48,6 +49,7 @@ import org.movsim.simulator.roadnetwork.controller.TrafficLight;
 import org.movsim.simulator.roadnetwork.controller.VariableMessageSignDiversion;
 import org.movsim.simulator.roadnetwork.predicates.VehicleWithinRange;
 import org.movsim.simulator.vehicles.Vehicle;
+import org.movsim.simulator.vehicles.Vehicle.Type;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,15 +65,15 @@ import com.google.common.collect.Lists;
  * by combining two road segments running in opposite directions.
  * </p>
  * <p>
- * RoadSegments may be combined to form a road network.
+ * RoadSegmentUtils may be combined to form a road network.
  * </p>
  * <p>
  * A RoadSegment is normally connected to two other road segments: a source road from which vehicles enter the road segment and a sink road
- * to which vehicles exit. RoadSegments at the edge of the network will normally be connected to only one other road segment: traffic inflow
+ * to which vehicles exit. RoadSegmentUtils at the edge of the network will normally be connected to only one other road segment: traffic inflow
  * and outflow will be controlled directly by source and sink objects.
  * </p>
  * <p>
- * RoadSegments are connected to each other on a lane-wise basis: each sink (outgoing) lane of a road segment may be connected to a source
+ * RoadSegmentUtils are connected to each other on a lane-wise basis: each sink (outgoing) lane of a road segment may be connected to a source
  * (incoming) lane of another road segment. This allows the forking and merging of road segments, the creation of on-ramps and off-ramps. By
  * connecting the lanes of a number of road segments in this way, complex junctions and interchanges may be created.
  * </p>
@@ -291,16 +293,6 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return sink != null;
     }
 
-    // /**
-    // * Sets the traffic sink for this road segment.
-    // *
-    // * @param sink
-    // * the traffic sink
-    // */
-    // final void setSink(TrafficSink sink) {
-    // this.sink = sink;
-    // }
-
     /**
      * Returns this road segment's length.
      * 
@@ -327,10 +319,6 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
      */
     public void setLaneType(int lane, Lanes.Type laneType) {
         laneSegments[lane - 1].setType(laneType);
-        if (roadMapping != null) {
-            // roadMapping.setTrafficLaneMin(trafficLaneMin());
-            // roadMapping.setTrafficLaneMax(trafficLaneMax());
-        }
     }
 
     /**
@@ -885,10 +873,10 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         checkFinishingOvertaking(dt);
     }
 
-    public void makeDynamicRoutingDecisions() {
+    public void makeDynamicRoutingDecisions(double dt, double simulationTime, long iterationCount) {
         for (LaneSegment laneSegment : laneSegments) {
             for (Vehicle vehicle : laneSegment) {
-                vehicle.routingDecisions().considerRouteAlternatives(this);
+                vehicle.routingDecisions().considerRouteAlternatives(simulationTime, this);
             }
         }
     }
@@ -974,6 +962,14 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         for (final Vehicle vehicle : overtakingSegment) {
             vehicle.updatePositionAndSpeed(dt);
         }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("vehicleCount={}, roadSegment={}", getVehicleCount(), toString());
+            for (Vehicle vehicle : this) {
+                if (vehicle.type() != Type.OBSTACLE) {
+                    LOG.debug(vehicle.toString());
+                }
+            }
+        }
     }
 
     /**
@@ -1039,14 +1035,6 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
     public Vehicle rearVehicle(int lane, double vehiclePos) {
         return laneSegments[lane - 1].rearVehicle(vehiclePos);
     }
-
-    // public Vehicle rearVehicleOnSinkLanePosAdjusted(int lane) {
-    // return laneSegments[lane - 1].rearVehicleOnSinkLanePosAdjusted();
-    // }
-
-    // Vehicle secondLastVehicleOnSinkLanePosAdjusted(int lane) {
-    // return laneSegments[lane - 1].secondLastVehicleOnSinkLanePosAdjusted();
-    // }
 
     /**
      * Returns the front vehicle on the given lane.
@@ -1293,15 +1281,15 @@ public class RoadSegment extends DefaultWeightedEdge implements Iterable<Vehicle
         return roadObjects.values(RoadObjectType.GRADIENT_PROFILE);
     }
 
+    public Iterable<FlowConservingBottleneck> flowConservingBottlenecks() {
+        return roadObjects.values(RoadObjectType.FLOW_CONSERVING_BOTTLENECK);
+    }
     /**
      * Asserts the road segment's class invariant. Used for debugging.
      */
     public boolean assertInvariant() {
         final RoadMapping roadMapping = roadMapping();
         if (roadMapping != null) {
-            // assert roadMapping.laneCount() == laneCount();
-            // assert roadMapping.trafficLaneMax() == trafficLaneMax();
-            // assert roadMapping.trafficLaneMin() == trafficLaneMin();
             assert Math.abs(roadMapping.roadLength() - roadLength()) < 0.1;
         }
         for (final LaneSegment laneSegment : laneSegments) {

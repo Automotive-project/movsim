@@ -448,6 +448,7 @@
     <xs:complexType name="PersonalNavigationDeviceType">
         <xs:attribute name="service_provider" type="xs:string" />
         <xs:attribute name="uncertainty" type="nonNegativeDouble" default="0.0" />
+        <xs:attribute name="rerouting_threshold" type="nonNegativeDouble" default="0.0" />
     </xs:complexType>
     <!-- %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% -->
     <xs:complexType name="ServiceProvidersType">
@@ -455,13 +456,16 @@
             <xs:element name="ServiceProvider" type="ServiceProviderType" minOccurs="0" maxOccurs="unbounded" />
         </xs:sequence>
     </xs:complexType>
-    <xs:complexType name="ServiceProviderType">
+    <xs:complexType name="ServiceProviderType">      
         <xs:sequence>
             <xs:element name="DecisionPoints" type="DecisionPointsType" minOccurs="0" maxOccurs="1" />
-        </xs:sequence>
+        </xs:sequence>  
         <xs:attribute name="label" type="xs:string" />
         <xs:attribute name="logging" type="xs:boolean" default="false" />
-        <!--<xs:attribute name="uncertainty" type="xs:double" default="0" />-->
+        <xs:attribute name="tau" type="nonNegativeDouble" default="0" />
+        <xs:attribute name="fluct_strength" type="nonNegativeDouble" default="0" />
+        <xs:attribute name="server_update_interval" type="nonNegativeDouble" default="0" />
+        <xs:attribute name="vehicle_update_interval" type="nonNegativeDouble" default="0" />
     </xs:complexType>
     <xs:complexType name="RouteAlternativesType">
         <xs:sequence>
@@ -485,6 +489,7 @@
         </xs:sequence>
         <xs:attribute name="roadId" type="xs:string" />
     </xs:complexType>
+
     <!-- %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% -->
     <xs:element name="Scenario">
         <xs:annotation>
